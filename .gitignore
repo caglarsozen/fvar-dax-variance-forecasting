@@ -1,45 +1,35 @@
-
-`.gitignore`
-
-```gitignore
-# R / RStudio
+# R
 .Rhistory
 .RData
 .Ruserdata
 .Rproj.user/
+*.Rproj
 
-# Dependency managers
-renv/library/
-renv/staging/
-packrat/lib*/
-packrat/src/
-
-# OS / editors
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# LaTeX build artifacts
+# LaTeX
 *.aux
 *.bbl
 *.bcf
 *.blg
 *.fdb_latexmk
 *.fls
-*.lof
 *.log
-*.lot
 *.out
 *.run.xml
 *.synctex.gz
 *.toc
-*.spl
 
-# Generated outputs
-outfvar_DAX_FINAL_PRUNE095_LOCKED/
-**/data/
-**/tables/
-**/tex/
-**/plots/
-**/debug/
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Private/local
+.env
+*.key
+*.token
+local_config.R
+
+# Large generated archives
+*.zip
+*.tar.gz
