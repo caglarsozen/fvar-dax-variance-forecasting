@@ -14,7 +14,7 @@ fvar_variance_pipeline_locked_v2.R
 
 The locked manuscript configuration in the script is:
 
-```r
+
 OUT_BASE    <- "outfvar_DAX_FINAL_PRUNE095_LOCKED_MINORREV_ENET"
 
 TARGET_RAW  <- "^GDAXI"
@@ -25,7 +25,7 @@ REFIT_MAIN  <- 20L
 
 AVAIL_MAIN  <- "DAX_CLOSE"
 AVAIL_ROB   <- "GLOBAL_CLOSE"
-
+```
 
 The main paper reports the conservative **DAX-Close** information-availability convention. The more permissive **Global-Close** convention is retained as a supplementary timing-robustness comparison.
 
