@@ -1,39 +1,10 @@
-###############################################################################
 # fVAR Variance Forecasting 
-# Target: DAX
-#
-# MAIN PAPER:        PRUNE095 + ref20 + DAX_CLOSE
-# APPENDIX ROBUST.:  PRUNE095 + ref20 + GLOBAL_CLOSE
-#
-# Included:
-# (1) Leak-safe preprocessing: DEV-only smoothing / EN / scaling / component selection
-# (2) Information availability protocol:
-#       - DAX_CLOSE    = MAIN
-#       - GLOBAL_CLOSE = APPENDIX ROBUSTNESS
-# (3) Stronger benchmarks: HAR, HAR-X(logVIX), GARCH, EGARCH, GJR-GARCH
-# (4) Inference rigor: DM one-sided + two-sided + Holm/BH; NW-lag sensitivity
-# (5) COMMON-aligned evaluation: strict intersection calendar; no LOCF
-# (6) Protocol comparisons:
-#       - selected functional vs GARCH
-#       - full model set, own common sets
-#       - relative-to-GARCH
-# (7) Diagnostics:
-#       - multi-model residual diagnostics (ARCH-LM, Ljung-Box on z_t^2)
-# (8) Locked manuscript configuration:
-#       - no design sweep selection in final reporting
-#       - baseline fixed at PRUNE095 / ref20 / DAX_CLOSE
-#
-# Corrections in this version:
-#   * fixed two-block table rbind issue
-#   * fixed retained-variable table truncation
-#   * fixed bootstrap B=10 consistency between main text and appendix sensitivity
-###############################################################################
 
 options(stringsAsFactors = FALSE)
 set.seed(20250105)
 
 # ============================= USER SETTINGS ==================================
-OUT_BASE    <- "outfvar_DAX_FINAL_PRUNE095_LOCKED"
+OUT_BASE    <- "outfvar_DAX_FINAL_PRUNE095_LOCKED_MINORREV_ENET"
 
 TARGET_RAW  <- "^GDAXI"
 TARGET_NAME <- "DAX"
@@ -82,28 +53,17 @@ cfg_pretty <- function(x){
 }
 
 # ============================= PACKAGES =======================================
-REQUIRED_PACKAGES <- c(
-  "data.table", "quantmod", "xts", "zoo", "glmnet",
-  "pls", "forecast", "ggplot2", "fda", "rugarch"
-)
-
-check_required_packages <- function(pkgs = REQUIRED_PACKAGES){
-  missing_pkgs <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
-  if(length(missing_pkgs) > 0L){
-    stop(
-      paste0(
-        "Missing required packages: ",
-        paste(missing_pkgs, collapse = ", "),
-        "\nInstall them first, for example via:\n",
-        "install.packages(c(",
-        paste(sprintf('\"%s\"', missing_pkgs), collapse = ", "),
-        "), repos = \"https://cloud.r-project.org\")"
-      )
-    )
+safe_install <- function(pkgs){
+  for(p in pkgs){
+    if(!requireNamespace(p, quietly = TRUE)){
+      install.packages(p, repos = "https://cloud.r-project.org")
+    }
   }
 }
 
-check_required_packages()
+safe_install(c(
+  "data.table","quantmod","xts","zoo","glmnet","pls","forecast","ggplot2","fda"
+))
 
 suppressPackageStartupMessages({
   library(data.table)
@@ -115,8 +75,15 @@ suppressPackageStartupMessages({
   library(forecast)
   library(ggplot2)
   library(fda)
-  library(rugarch)
 })
+
+if(!requireNamespace("rugarch", quietly = TRUE)){
+  install.packages("rugarch", repos = "https://cloud.r-project.org")
+}
+if(!requireNamespace("rugarch", quietly = TRUE)){
+  stop("Package 'rugarch' could not be installed. It is required for GARCH benchmarks.")
+}
+suppressPackageStartupMessages(library(rugarch))
 
 # ============================= DIR HELPERS ====================================
 mk_run_dirs <- function(OUT){
@@ -155,7 +122,7 @@ pad_even_dt <- function(DT){
 
 write_longtable_2block <- function(df, OUT, name, caption, label, left_cols, right_cols){
   stopifnot(length(left_cols) == 3, length(right_cols) == 3)
-  
+
   df2 <- as.data.frame(df, stringsAsFactors = FALSE)
   if(nrow(df2) == 0){
     df2 <- data.frame(
@@ -164,17 +131,17 @@ write_longtable_2block <- function(df, OUT, name, caption, label, left_cols, rig
     )
     names(df2) <- left_cols
   }
-  
+
   if(nrow(df2) %% 2 == 1){
     blank_row <- as.list(rep("", ncol(df2)))
     names(blank_row) <- names(df2)
     df2 <- rbind(df2, blank_row)
   }
-  
+
   half <- nrow(df2) / 2
   LHS  <- df2[1:half, , drop = FALSE]
   RHS  <- df2[(half + 1):nrow(df2), , drop = FALSE]
-  
+
   tex <- c(
     "\\begin{longtable}{L M P L M P}",
     "\\footnotesize",
@@ -200,7 +167,7 @@ write_longtable_2block <- function(df, OUT, name, caption, label, left_cols, rig
     "\\bottomrule",
     "\\endlastfoot"
   )
-  
+
   for(i in seq_len(half)){
     row <- c(
       tex_escape(LHS[i, left_cols[1]]),  tex_escape(LHS[i, left_cols[2]]),  tex_escape(LHS[i, left_cols[3]]),
@@ -209,9 +176,9 @@ write_longtable_2block <- function(df, OUT, name, caption, label, left_cols, rig
     tex <- c(tex, sprintf("%s & %s & %s & %s & %s & %s\\\\",
                           row[1], row[2], row[3], row[4], row[5], row[6]))
   }
-  
+
   tex <- c(tex, "\\end{longtable}")
-  
+
   fn <- file.path(OUT, "tex", paste0(name, ".tex"))
   dir.create(dirname(fn), showWarnings = FALSE, recursive = TRUE)
   writeLines(tex, fn)
@@ -220,12 +187,12 @@ write_longtable_2block <- function(df, OUT, name, caption, label, left_cols, rig
 
 write_longtable_simple <- function(df, OUT, name, caption, label, align = NULL){
   df <- as.data.frame(df, stringsAsFactors = FALSE)
-  
+
   if(nrow(df) == 0){
     df <- as.data.frame(matrix("", nrow = 1, ncol = ncol(df)))
     names(df) <- colnames(df)
   }
-  
+
   if(is.null(align)){
     if(ncol(df) == 1L){
       align <- "l"
@@ -233,9 +200,9 @@ write_longtable_simple <- function(df, OUT, name, caption, label, align = NULL){
       align <- paste(c("l", rep("c", ncol(df) - 1L)), collapse = "")
     }
   }
-  
+
   hdr <- paste(sprintf("\\textbf{%s}", names(df)), collapse = " & ")
-  
+
   tex <- c(
     sprintf("\\begin{longtable}{%s}", align),
     "\\footnotesize",
@@ -257,14 +224,14 @@ write_longtable_simple <- function(df, OUT, name, caption, label, align = NULL){
     "\\bottomrule",
     "\\endlastfoot"
   )
-  
+
   for(i in seq_len(nrow(df))){
     row <- tex_escape(unlist(df[i, , drop = FALSE], use.names = FALSE))
     tex <- c(tex, paste0(paste(row, collapse = " & "), "\\\\"))
   }
-  
+
   tex <- c(tex, "\\end{longtable}")
-  
+
   fn <- file.path(OUT, "tex", paste0(name, ".tex"))
   dir.create(dirname(fn), showWarnings = FALSE, recursive = TRUE)
   writeLines(tex, fn)
@@ -281,11 +248,38 @@ display_model <- function(x){
   out[x == "GARCH(1,1)"] <- "GARCH(1,1)"
   out[x == "EGARCH(1,1)"] <- "EGARCH(1,1)"
   out[x == "GJR-GARCH(1,1)"] <- "GJR-GARCH(1,1)"
+  out[x == "Elastic Net lag stack"] <- "Elastic Net lag stack"
   out[x == "fVAR"] <- "fVAR"
   out[x == "fVAR-X(+logv_t)"] <- "fVAR-X(+logv$_t$)"
   out[x == "fVAR-Lagged"] <- "fVAR-Lagged"
   out[x == "fVAR-Lagged-X"] <- "fVAR-Lagged-X"
   out
+}
+
+plot_model_label <- function(x){
+  out <- as.character(x)
+  out[out == "Persistence(v_t)"] <- "Persistence(v[t])"
+  out[out == "AR(1)-logv"] <- "AR(1)-logv"
+  out[out == "HAR"] <- "HAR"
+  out[out == "HAR-X(logVIX)"] <- "HAR-X(logVIX)"
+  out[out == "GARCH(1,1)"] <- "GARCH(1,1)"
+  out[out == "EGARCH(1,1)"] <- "EGARCH(1,1)"
+  out[out == "GJR-GARCH(1,1)"] <- "GJR-GARCH(1,1)"
+  out[out == "Elastic Net lag stack"] <- "Elastic Net lag stack"
+  out[out == "fVAR"] <- "fVAR"
+  out[out == "fVAR-X(+logv_t)"] <- "fVAR-X(+logv[t])"
+  out[out == "fVAR-Lagged"] <- "fVAR-Lagged"
+  out[out == "fVAR-Lagged-X"] <- "fVAR-Lagged-X"
+  out
+}
+
+avail_pretty <- function(x){
+  ifelse(x == "DAX_CLOSE", "DAX-Close",
+         ifelse(x == "GLOBAL_CLOSE", "Global-Close", gsub("_", "-", x)))
+}
+
+avail_tex_macro <- function(x){
+  ifelse(x == "DAX_CLOSE", "\\DAXCLOSE", "\\GLOBALCLOSE")
 }
 
 fmt4 <- function(x) sprintf("%.4f", x)
@@ -300,10 +294,6 @@ fmt_p_std <- function(x){
 fmt_sci_or_fixed <- function(x){
   ifelse(!is.finite(x), "",
          ifelse(abs(x) < 1e-4, format(x, scientific = TRUE), formatC(x, format = "f", digits = 4)))
-}
-
-avail_mode_latex <- function(x){
-  if(identical(x, "DAX_CLOSE")) "\\DAXCLOSE" else "\\GLOBALCLOSE"
 }
 
 # ============================= SYMBOL MAPS ====================================
@@ -436,7 +426,7 @@ arch_lm <- function(z, m = 10L){
   z2 <- as.numeric(z)^2
   z2 <- z2[is.finite(z2)]
   if(length(z2) <= m + 10L) return(list(stat = NA, p = NA, n = length(z2)))
-  
+
   y <- z2[(m + 1):length(z2)]
   X <- sapply(1:m, function(k) z2[(m + 1 - k):(length(z2) - k)])
   fit <- lm(y ~ X)
@@ -467,18 +457,18 @@ dm_loss <- function(loss1, loss2, alternative = c("less","greater","two.sided"),
   d  <- (loss1 - loss2)[ok]
   n  <- length(d)
   if(n < 40L) return(list(stat = NA, p = NA, n = n))
-  
+
   v  <- nw_var(d, L = L)
   se <- sqrt(v / n)
   if(!is.finite(se) || se <= 0) return(list(stat = NA, p = NA, n = n))
-  
+
   stat <- mean(d) / se
   df   <- n - 1L
-  
+
   if(alternative == "less")      p <- pt(stat, df = df)
   if(alternative == "greater")   p <- 1 - pt(stat, df = df)
   if(alternative == "two.sided") p <- 2 * min(pt(stat, df = df), 1 - pt(stat, df = df))
-  
+
   list(stat = as.numeric(stat), p = as.numeric(p), n = n)
 }
 
@@ -487,11 +477,11 @@ mbb_mean_diff <- function(diff_series, B = 10L, R = 2000L){
   d <- d[is.finite(d)]
   n <- length(d)
   if(n < 60L) return(list(mean = NA, p_one = NA, ci = c(NA, NA), B = B, n = n))
-  
+
   nb     <- ceiling(n / B)
   starts <- 1:(n - B + 1L)
   blocks <- lapply(starts, function(s) d[s:(s + B - 1L)])
-  
+
   means <- numeric(R)
   for(r in seq_len(R)){
     idx <- sample.int(length(blocks), size = nb, replace = TRUE)
@@ -499,11 +489,11 @@ mbb_mean_diff <- function(diff_series, B = 10L, R = 2000L){
     x   <- x[1:n]
     means[r] <- mean(x)
   }
-  
+
   m0    <- mean(d)
   p_one <- mean(means >= 0)
   ci    <- as.numeric(quantile(means, probs = c(0.025, 0.975), na.rm = TRUE))
-  
+
   list(mean = m0, p_one = p_one, ci = ci, B = B, n = n)
 }
 
@@ -537,6 +527,7 @@ MODEL_MAP <- c(
   "GARCH(1,1)"       = "GARCH11",
   "EGARCH(1,1)"      = "EGARCH11",
   "GJR-GARCH(1,1)"   = "GJR11",
+  "Elastic Net lag stack" = "EN_LagStack",
   "fVAR"             = "fVAR",
   "fVAR-X(+logv_t)"  = "fVAR_X",
   "fVAR-Lagged"      = "fVAR_L",
@@ -547,7 +538,7 @@ FUNCTIONAL_LABELS <- c("fVAR", "fVAR-X(+logv_t)", "fVAR-Lagged", "fVAR-Lagged-X"
 
 collect_metric_table_from_M <- function(M){
   V_true <- as.numeric(M[, "Actual"])
-  
+
   out <- rbindlist(lapply(names(MODEL_MAP), function(lbl){
     col_nm <- MODEL_MAP[[lbl]]
     data.table(
@@ -555,7 +546,7 @@ collect_metric_table_from_M <- function(M){
       metric_var(V_true, as.numeric(M[, col_nm]))
     )
   }), fill = TRUE)
-  
+
   q_garch <- out[Model == "GARCH(1,1)", QLIKE]
   out[, Delta_QLIKE_vs_GARCH := QLIKE - q_garch]
   out[, Rank_QLIKE := frank(QLIKE, ties.method = "first")]
@@ -579,14 +570,14 @@ make_protocol_modelset_compare <- function(tab_main, tab_rob,
                  Rank_ROB   = Rank_QLIKE)],
     by = "Model", all = TRUE
   )
-  
+
   setnames(x,
            old = c("QLIKE_MAIN","Rank_MAIN","QLIKE_ROB","Rank_ROB"),
            new = c(paste0("QLIKE_", main_name),
                    paste0("Rank_",  main_name),
                    paste0("QLIKE_", rob_name),
                    paste0("Rank_",  rob_name)))
-  
+
   x[, Delta_MAIN_minus_ROB := get(paste0("QLIKE_", main_name)) - get(paste0("QLIKE_", rob_name))]
   setorderv(x, cols = c(paste0("Rank_", main_name), paste0("Rank_", rob_name)))
   x[]
@@ -600,12 +591,12 @@ make_protocol_vs_garch_compare <- function(tab_main, tab_rob,
     tab_rob[,  .(Model, Delta_vs_GARCH_ROB  = Delta_QLIKE_vs_GARCH)],
     by = "Model", all = TRUE
   )
-  
+
   setnames(x,
            old = c("Delta_vs_GARCH_MAIN","Delta_vs_GARCH_ROB"),
            new = c(paste0("Delta_vs_GARCH_", main_name),
                    paste0("Delta_vs_GARCH_", rob_name)))
-  
+
   x[, DeltaGap_MAIN_minus_ROB :=
       get(paste0("Delta_vs_GARCH_", main_name)) -
       get(paste0("Delta_vs_GARCH_", rob_name))]
@@ -618,18 +609,18 @@ make_crossprotocol_common_compare <- function(M_main, M_rob,
                                               rob_name  = "GLOBAL_CLOSE"){
   common_dates <- intersect(index(M_main), index(M_rob))
   if(length(common_dates) < 50L) return(NULL)
-  
+
   M_main_cc <- M_main[common_dates]
   M_rob_cc  <- M_rob[common_dates]
-  
+
   tab_main_cc <- collect_metric_table_from_M(M_main_cc)
   tab_rob_cc  <- collect_metric_table_from_M(M_rob_cc)
-  
+
   full_cc <- make_protocol_modelset_compare(tab_main_cc, tab_rob_cc,
                                             main_name = main_name, rob_name = rob_name)
   rel_cc  <- make_protocol_vs_garch_compare(tab_main_cc, tab_rob_cc,
                                             main_name = main_name, rob_name = rob_name)
-  
+
   list(
     dates       = common_dates,
     tab_main_cc = tab_main_cc,
@@ -643,38 +634,38 @@ make_crossprotocol_common_compare <- function(M_main, M_rob,
 prune_by_corr <- function(ret_panel, sym_names, thr = 0.95){
   keep <- sym_names
   if(length(keep) <= 2L) return(keep)
-  
+
   repeat {
     C <- suppressWarnings(cor(ret_panel[, keep, drop = FALSE], use = "pairwise.complete.obs"))
     C[lower.tri(C, diag = TRUE)] <- NA_real_
     mx <- max(abs(C), na.rm = TRUE)
     if(!is.finite(mx) || mx <= thr) break
-    
+
     ij <- which(abs(C) == mx, arr.ind = TRUE)[1, ]
     a  <- keep[ij[1]]
     b  <- keep[ij[2]]
     ma <- mean(abs(C[a, ]), na.rm = TRUE)
     mb <- mean(abs(C[b, ]), na.rm = TRUE)
     drop <- ifelse(ma >= mb, a, b)
-    
+
     keep <- setdiff(keep, drop)
     if(length(keep) <= 2L) break
   }
-  
+
   keep
 }
 
 build_panel <- function(selected_raw_syms, target_raw, cfg_name,
                         avail_mode = c("GLOBAL_CLOSE","DAX_CLOSE")){
   avail_mode <- match.arg(avail_mode)
-  
+
   closes <- lapply(selected_raw_syms, function(s) close_list[[s]])
   names(closes) <- selected_raw_syms
-  
+
   close_panel <- do.call(merge, c(closes, all = FALSE))
   colnames(close_panel) <- sapply(selected_raw_syms, function(s) NAME_MAP[[s]])
   close_panel <- na.omit(close_panel)
-  
+
   ret_list <- list()
   for(s in selected_raw_syms){
     nm   <- NAME_MAP[[s]]
@@ -690,38 +681,38 @@ build_panel <- function(selected_raw_syms, target_raw, cfg_name,
     }
     ret_list[[nm]] <- r
   }
-  
+
   ret_panel <- do.call(merge, c(ret_list, all = FALSE))
   ret_panel <- na.omit(ret_panel)
-  
+
   close_panel <- close_panel[index(ret_panel), , drop = FALSE]
-  
+
   if(avail_mode == "DAX_CLOSE"){
     lag_raw   <- intersect(selected_raw_syms, selected_raw_syms[sapply(selected_raw_syms, is_after_dax_close_raw)])
     lag_names <- sapply(lag_raw, function(s) NAME_MAP[[s]])
     lag_names <- intersect(lag_names, colnames(ret_panel))
-    
+
     targ_nm <- NAME_MAP[[target_raw]]
     lag_names <- setdiff(lag_names, targ_nm)
-    
+
     if(length(lag_names) > 0){
       ret_panel[, lag_names]   <- lag_xts_k(ret_panel[, lag_names, drop = FALSE], k = 1L)
       close_panel[, lag_names] <- lag_xts_k(close_panel[, lag_names, drop = FALSE], k = 1L)
     }
   }
-  
+
   ok_ret   <- complete.cases(ret_panel)
   ok_close <- complete.cases(close_panel)
   idx_keep <- index(ret_panel)[ok_ret & ok_close]
   ret_panel   <- ret_panel[idx_keep, , drop = FALSE]
   close_panel <- close_panel[idx_keep, , drop = FALSE]
-  
+
   if(cfg_name == "PRUNE095"){
     idx_raw   <- intersect(IDX_GROUP, selected_raw_syms)
     idx_names <- sapply(idx_raw, function(s) NAME_MAP[[s]])
     idx_names <- intersect(idx_names, colnames(ret_panel))
     non_idx   <- setdiff(colnames(ret_panel), idx_names)
-    
+
     if(length(idx_names) >= 3L){
       keep_idx  <- prune_by_corr(ret_panel, idx_names, thr = 0.95)
       keep_cols <- c(non_idx, keep_idx)
@@ -729,12 +720,12 @@ build_panel <- function(selected_raw_syms, target_raw, cfg_name,
       close_panel <- close_panel[, keep_cols, drop = FALSE]
     }
   }
-  
+
   target_nm <- NAME_MAP[[target_raw]]
   if(!(target_nm %in% colnames(ret_panel))){
     stop("Target missing after panel build: ", target_nm)
   }
-  
+
   list(close_panel = close_panel, ret_panel = ret_panel, target_nm = target_nm)
 }
 
@@ -762,7 +753,7 @@ win_features <- function(M){
 oos_forecast_expanding <- function(y, X = NULL, idx_eval, refit_every, fit_fun, pred_fun){
   yhat <- rep(NA_real_, length(idx_eval))
   fit  <- NULL
-  
+
   for(j in seq_along(idx_eval)){
     i <- idx_eval[j]
     if(j == 1L || ((j - 1L) %% refit_every) == 0L){
@@ -773,7 +764,7 @@ oos_forecast_expanding <- function(y, X = NULL, idx_eval, refit_every, fit_fun, 
     yhat[j] <- tryCatch(pred_fun(fit, if(!is.null(X)) X[i, , drop = FALSE] else NULL),
                         error = function(e) NA_real_)
   }
-  
+
   yhat
 }
 
@@ -790,31 +781,31 @@ pls_fit_best_blocked <- function(X, y, max_comp = 8L, nseg = 5L){
   X <- as.matrix(X)
   n <- nrow(X)
   p <- ncol(X)
-  
+
   max_comp <- min(max_comp, p, n - 5L)
   if(max_comp < 1L) stop("Not enough data for PLS.")
-  
+
   brks   <- floor(seq(0, n, length.out = nseg + 1L))
   cv_err <- rep(0, max_comp)
   cv_n   <- rep(0, max_comp)
-  
+
   for(s in 2:nseg){
     tr_end <- brks[s - 1L]
     va_st  <- brks[s - 1L] + 1L
     va_en  <- brks[s]
     if(tr_end < 30L || va_st > va_en) next
-    
+
     Xtr <- X[1:tr_end, , drop = FALSE]
     ytr <- y[1:tr_end]
     Xva <- X[va_st:va_en, , drop = FALSE]
     yva <- y[va_st:va_en]
-    
+
     df_tr <- data.frame(y = ytr, Xtr, check.names = FALSE)
     fit   <- try(plsr(y ~ ., data = df_tr, ncomp = max_comp,
                       method = "oscorespls", scale = FALSE),
                  silent = TRUE)
     if(inherits(fit, "try-error")) next
-    
+
     df_va <- data.frame(Xva, check.names = FALSE)
     for(k in 1:max_comp){
       ph <- try(as.numeric(predict(fit, newdata = df_va, ncomp = k)), silent = TRUE)
@@ -826,14 +817,14 @@ pls_fit_best_blocked <- function(X, y, max_comp = 8L, nseg = 5L){
       }
     }
   }
-  
+
   cv_mse <- cv_err / pmax(cv_n, 1L)
   best_k <- which.min(cv_mse)
-  
+
   df_full <- data.frame(y = y, X, check.names = FALSE)
   fit_full <- plsr(y ~ ., data = df_full, ncomp = best_k,
                    method = "oscorespls", scale = FALSE)
-  
+
   list(fit = fit_full, ncomp = best_k, xnames = colnames(X), cv_mse = cv_mse)
 }
 
@@ -859,12 +850,42 @@ pred_lm_1step <- function(fit, Xnew){
   as.numeric(predict(fit, newdata = df))
 }
 
+fit_enet_blocked <- function(ytr, Xtr){
+  Xtr <- as.matrix(Xtr)
+  ytr <- as.numeric(ytr)
+  ok <- is.finite(ytr) & complete.cases(Xtr)
+  Xtr <- Xtr[ok, , drop = FALSE]
+  ytr <- ytr[ok]
+  if(nrow(Xtr) < 60L || ncol(Xtr) < 1L) stop("Not enough data for Elastic Net lag stack.")
+
+  K <- min(5L, max(2L, floor(nrow(Xtr) / 30L)))
+  foldid <- make_blocked_foldid(nrow(Xtr), K = K)
+
+  fit <- cv.glmnet(
+    x = Xtr,
+    y = ytr,
+    alpha = EN_ALPHA,
+    foldid = foldid,
+    grouped = FALSE,
+    standardize = FALSE
+  )
+
+  list(fit = fit, xnames = colnames(Xtr), lambda = fit$lambda.1se)
+}
+
+pred_enet_1step <- function(obj, Xnew){
+  if(is.null(obj)) return(NA_real_)
+  Xnew <- as.matrix(Xnew)
+  colnames(Xnew) <- obj$xnames
+  as.numeric(predict(obj$fit, newx = Xnew, s = obj$lambda))
+}
+
 har_design <- function(logv, t_end_idx, Xextra = NULL){
   t0 <- t_end_idx
   lag1   <- logv[t0]
   mean5  <- sapply(t0, function(tt) mean(logv[(tt - 4L):tt],  na.rm = TRUE))
   mean22 <- sapply(t0, function(tt) mean(logv[(tt - 21L):tt], na.rm = TRUE))
-  
+
   X <- cbind(lag1 = lag1, mean5 = mean5, mean22 = mean22)
   if(!is.null(Xextra)) X <- cbind(X, Xextra)
   X
@@ -874,11 +895,11 @@ garch_forecast_oos_map <- function(ret_target, t_end_idx, idx_eval, refit_every,
   r    <- as.numeric(ret_target)
   yhat <- rep(NA_real_, length(idx_eval))
   fit  <- NULL
-  
+
   for(j in seq_along(idx_eval)){
     i        <- idx_eval[j]
     t_origin <- t_end_idx[i]
-    
+
     if(j == 1L || ((j - 1L) %% refit_every) == 0L){
       tr   <- 1:t_origin
       r_tr <- r[tr]
@@ -887,22 +908,22 @@ garch_forecast_oos_map <- function(ret_target, t_end_idx, idx_eval, refit_every,
                   silent = TRUE)
       if(inherits(fit, "try-error")) fit <- NULL
     }
-    
+
     if(is.null(fit)){
       yhat[j] <- NA_real_
       next
     }
-    
+
     fc <- try(rugarch::ugarchforecast(fit, n.ahead = 1), silent = TRUE)
     if(inherits(fc, "try-error")){
       yhat[j] <- NA_real_
       next
     }
-    
+
     sig <- as.numeric(rugarch::sigma(fc))
     yhat[j] <- sig^2
   }
-  
+
   yhat
 }
 
@@ -913,96 +934,99 @@ z_from_vhat <- function(r, vhat){
 # ============================= ONE RUN ========================================
 run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CLOSE")){
   avail_mode <- match.arg(avail_mode)
-  
+
   run_tag <- paste0("run_", TARGET_NAME, "__", cfg_name, "__ref", refit_every, "__", avail_mode)
   OUT <- file.path(OUT_BASE, run_tag)
   mk_run_dirs(OUT)
-  
+
+  avail_plot <- avail_pretty(avail_mode)
+  avail_tex  <- avail_tex_macro(avail_mode)
+
   message("\n=== RUN: target=DAX cfg=", cfg_name,
           " refit=", refit_every,
           " avail=", avail_mode, " ===")
-  
+
   sel_raw <- make_predictors_raw(TARGET_RAW, cfg = cfg_name)
   sel_raw <- intersect(sel_raw, ok_syms)
   sel_raw <- unique(c(sel_raw, TARGET_RAW))
-  
+
   pan <- build_panel(sel_raw, TARGET_RAW, cfg_name, avail_mode = avail_mode)
   close_panel <- pan$close_panel
   ret_panel   <- pan$ret_panel
   target_nm   <- pan$target_nm
-  
+
   write.csv(data.frame(Date = index(ret_panel), coredata(ret_panel)),
             file.path(OUT, "data", "panel_returns_common_calendar.csv"),
             row.names = FALSE)
-  
+
   rv <- rv_roger_satchell(ohlc_list[[TARGET_RAW]])
   rv <- rv[index(ret_panel)]
   rv <- na.omit(rv)
-  
+
   ret_panel   <- ret_panel[index(rv), , drop = FALSE]
   close_panel <- close_panel[index(rv), , drop = FALSE]
   logv        <- log(as.numeric(rv) + 1e-12)
-  
+
   write.csv(data.frame(Date = index(rv), RV = as.numeric(rv), logRV = logv),
             file.path(OUT, "data", "target_RS_variance.csv"),
             row.names = FALSE)
-  
+
   # ----- Descriptive stats ----------------------------------------------------
   DESC <- t(apply(ret_panel, 2, desc_stats))
   DESC <- data.frame(Series = rownames(DESC), round(DESC, 6), row.names = NULL)
   write_csv(DESC, OUT, "A1_desc_returns_raw")
-  
+
   desc_tex <- DESC[, c("Series","SD","MAD","Min","Max")]
   write_longtable_2block(
     desc_tex,
     OUT, "A1_desc_returns",
-    caption = sprintf("Descriptive statistics of transformed daily predictors under the strict intersection calendar (no imputation), reported for the locked baseline design under %s.", avail_mode_latex(avail_mode)),
+    caption = sprintf("Descriptive statistics of transformed daily predictors under the strict intersection calendar (no imputation), reported for the locked design under %s.", avail_tex),
     label   = sprintf("tab:desc_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
     left_cols  = c("Series","SD","MAD"),
     right_cols = c("Series","Min","Max")
   )
-  
+
   # ----- Functional dataset ---------------------------------------------------
   retX <- ret_panel
   Tn   <- nrow(retX)
-  
+
   W_START <- max(W_CURVE, 22L)
   t_end   <- W_START:(Tn - 1L)
   N       <- length(t_end)
   if(N < 250L) stop("Too few observations after intersection calendar.")
-  
+
   PRED_VARS <- colnames(retX)
-  
+
   Xwin_list <- lapply(PRED_VARS, function(v) rollmat(retX[, v], W_CURVE))
   names(Xwin_list) <- PRED_VARS
-  
+
   k_idx <- t_end - (W_CURVE - 1L)
   Xwin_aligned <- lapply(Xwin_list, function(M) M[k_idx, , drop = FALSE])
-  
+
   y_logv <- logv[t_end + 1L]
   y_rv   <- as.numeric(rv)[t_end + 1L]
-  
+
   # ----- Splits ---------------------------------------------------------------
   n_all     <- N
   n_test    <- floor(TEST_RATIO * n_all)
   n_dev     <- n_all - n_test
   n_val     <- floor(VAL_RATIO_DEV * n_dev)
   train_end <- n_dev - n_val
-  
+
   idx_val    <- (train_end + 1L):n_dev
   idx_test   <- (n_dev + 1L):n_all
   idx_dev    <- 1:n_dev
-  
+
   curve_grid <- 1:W_CURVE
   eval_grid  <- seq(1, W_CURVE, length.out = GRID_EVAL)
-  
+
   smooth_linear <- function(wvec){
     approx(x = curve_grid, y = wvec, xout = eval_grid, rule = 2)$y
   }
-  
+
   # ----- Representative series for DEV-only GCV -------------------------------
   rep_var <- if(REP_SERIES_GCV %in% names(Xwin_aligned)) REP_SERIES_GCV else names(Xwin_aligned)[1]
-  
+
   DESIGN_META <- data.table(
     Target                       = TARGET_NAME,
     CandidatePredictorSet        = cfg_name,
@@ -1013,33 +1037,35 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     GCV_Lambda_Grid              = paste(format(LAMBDA_GRID, scientific = TRUE), collapse = ","),
     PLS_Component_Grid           = paste(seq_len(PLS_MAX_COMP), collapse = ","),
     PLS_NSegments                = PLS_NSEG,
+    ML_Benchmark                 = "Elastic Net lag stack with blocked time-ordered CV and lambda.1se",
+    MinimalAblation              = "Smoothed window-to-curve + PLS versus raw lag-stack Elastic Net",
     PLS_BlockedValidation        = "Forward contiguous blocked validation: segment s validates on block s; training uses blocks 1:(s-1)",
     DEV_Block_Split              = sprintf("After holding out TEST, DEV has %d observations; internal validation uses the last %d observations of DEV (%.0f%%).",
                                            n_dev, n_val, 100 * VAL_RATIO_DEV)
   )
   write_csv(DESIGN_META, OUT, "A0_design_meta")
-  
+
   # ----- DEV-only GCV for smoothing ------------------------------------------
   OPT_NB <- NBASIS_GRID[1]
   OPT_LA <- LAMBDA_GRID[3]
-  
+
   if(USE_BSPLINE_SMOOTH){
     Mrep    <- Xwin_aligned[[rep_var]]
-    
+
     dev_rows <- idx_dev
     n_sub    <- min(GCV_SUBSAMPLE_WINDOWS, length(dev_rows))
     sub_idx  <- sort(sample(dev_rows, size = n_sub, replace = FALSE))
-    
+
     gcv_grid <- CJ(nbasis = NBASIS_GRID, lambda = LAMBDA_GRID)
     gcv_grid[, gcv := NA_real_]
-    
+
     for(ii in 1:nrow(gcv_grid)){
       nb  <- gcv_grid$nbasis[ii]
       lam <- gcv_grid$lambda[ii]
-      
+
       basis_tmp <- create.bspline.basis(rangeval = c(1, W_CURVE), nbasis = nb)
       fdParobj  <- fdPar(basis_tmp, Lfdobj = int2Lfd(2), lambda = lam)
-      
+
       gcv_vals <- rep(NA_real_, n_sub)
       for(k in seq_along(sub_idx)){
         yk <- matrix(Mrep[sub_idx[k], ], ncol = 1)
@@ -1048,13 +1074,13 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
       }
       gcv_grid$gcv[ii] <- mean(gcv_vals, na.rm = TRUE)
     }
-    
+
     best_row <- gcv_grid[which.min(gcv), ]
     OPT_NB <- best_row$nbasis
     OPT_LA <- best_row$lambda
-    
+
     write_csv(gcv_grid, OUT, "A2_gcv_grid_raw")
-    
+
     gcv_tex <- copy(gcv_grid)
     gcv_tex[, `Basis size` := nbasis]
     gcv_tex[, `\\lambda` := fifelse(
@@ -1065,28 +1091,28 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     )]
     gcv_tex[, GCV := formatC(gcv, format = "f", digits = 6)]
     gcv_tex <- gcv_tex[, .(`Basis size`, `\\lambda`, GCV)]
-    
+
     write_longtable_2block(
       gcv_tex,
       OUT, "A2_gcv_grid",
-      caption = sprintf("Representative-window GCV grid for B-spline smoothing on DEV ($W=%d$), reported for the locked baseline design under %s. The representative predictor series is %s.", W_CURVE, avail_mode_latex(avail_mode), rep_var),
+      caption = sprintf("Representative-window GCV grid for B-spline smoothing on DEV ($W=%d$), reported for the locked design under %s. The representative predictor series is %s.", W_CURVE, avail_tex, rep_var),
       label = sprintf("tab:gcv_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
       left_cols  = c("Basis size","\\lambda","GCV"),
       right_cols = c("Basis size","\\lambda","GCV")
     )
-    
+
     gcv_plot_dt <- copy(gcv_grid)
     gcv_plot_dt[, lambda_s := format(lambda, scientific = TRUE)]
-    
+
     p_gcv <- ggplot(gcv_plot_dt, aes(x = lambda_s, y = factor(nbasis), fill = gcv)) +
       geom_tile() +
-      labs(x = "lambda", y = "nbasis",
-           title = sprintf("GCV heatmap (DEV-only; rep=%s; W=%d)", rep_var, W_CURVE)) +
+      labs(x = "lambda", y = "Number of B-spline basis functions",
+           title = sprintf("GCV heatmap (DEV-only; W=%d; representative series = %s)", W_CURVE, rep_var)) +
       theme_minimal(base_size = 14)
-    
+
     ggsave(file.path(OUT, "plots", "F4_gcv_heatmap.png"),
            p_gcv, width = 11, height = 5.5, dpi = PLOT_DPI)
-    
+
     smooth_bspline <- function(wvec){
       basis_use <- create.bspline.basis(rangeval = c(1, W_CURVE), nbasis = OPT_NB)
       fdParobj  <- fdPar(basis_use, Lfdobj = int2Lfd(2), lambda = OPT_LA)
@@ -1095,12 +1121,12 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
       if(inherits(sm, "try-error")) return(smooth_linear(wvec))
       as.numeric(eval.fd(eval_grid, sm$fd))
     }
-    
+
     WINDOW_TO_GRID <- smooth_bspline
   } else {
     WINDOW_TO_GRID <- smooth_linear
   }
-  
+
   # ----- Construct functional/grid features ----------------------------------
   Xflat <- NULL
   for(v in names(Xwin_aligned)){
@@ -1109,7 +1135,7 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     colnames(M2) <- paste0(v, "_g", seq_len(GRID_EVAL))
     Xflat <- cbind(Xflat, M2)
   }
-  
+
   Xsum <- NULL
   feat_names <- c("mu","sd","last","slope")
   for(v in names(Xwin_aligned)){
@@ -1117,11 +1143,11 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     colnames(F) <- paste0(v, "_", feat_names)
     Xsum <- cbind(Xsum, F)
   }
-  
+
   # ----- DEV-only scaling -----------------------------------------------------
   Xflat_std <- standardize_by_idx(Xflat, idx_fit = idx_dev)$Xs
   Xsum_std  <- standardize_by_idx(Xsum,  idx_fit = idx_dev)$Xs
-  
+
   # ----- DEV-only blocked Elastic Net ----------------------------------------
   foldid_dev <- make_blocked_foldid(length(idx_dev), K = 5L)
   en_fit <- cv.glmnet(
@@ -1131,26 +1157,30 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     foldid  = foldid_dev,
     grouped = FALSE
   )
-  
+
   co <- as.matrix(coef(en_fit, s = "lambda.min"))
   sel_feat <- rownames(co)[abs(co[, 1]) > 1e-10]
   sel_feat <- setdiff(sel_feat, "(Intercept)")
   sel_vars <- unique(sub("_(mu|sd|last|slope)$", "", sel_feat))
   if(length(sel_vars) == 0L) sel_vars <- names(Xwin_aligned)
-  
+
   png(file.path(OUT, "plots", "F3_elasticnet_cv.png"),
-      width = 11, height = 6, units = "in", res = PLOT_DPI)
-  par(mar = c(4,4,2,1) + 0.2)
-  plot(en_fit, main = "Elastic Net CV (DEV-only; blocked folds)")
+      width = 11, height = 6.4, units = "in", res = PLOT_DPI)
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+  par(mar = c(5, 5, 7, 2) + 0.1)
+  plot(en_fit, main = "")
+  mtext("Elastic Net CV (DEV-only; blocked folds)",
+        side = 3, line = 5.0, font = 2, cex = 1.25)
   dev.off()
-  
+
   SELTAB <- data.table(`Retained variable` = sel_vars)
   SELTAB[, blank1 := ""]
   SELTAB[, blank2 := ""]
   SELTAB <- SELTAB[, .(`Retained variable`, blank1, blank2)]
   SELTAB <- pad_even_dt(SELTAB)
   write_csv(SELTAB, OUT, "A3_selected_vars_raw")
-  
+
   write_longtable_2block(
     SELTAB,
     OUT, "A3_selected_vars",
@@ -1159,26 +1189,40 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     left_cols  = c("Retained variable","blank1","blank2"),
     right_cols = c("Retained variable","blank1","blank2")
   )
-  
+
   keep_cols  <- unlist(lapply(sel_vars, function(vv) grep(paste0("^", vv, "_g"), colnames(Xflat_std), value = TRUE)))
   Xflat_sel  <- Xflat_std[, keep_cols, drop = FALSE]
-  
+
   # ----- Lagged functional designs -------------------------------------------
   Xflat_lag <- cbind(Xflat_sel[-1, , drop = FALSE], Xflat_sel[-N, , drop = FALSE])
   colnames(Xflat_lag) <- c(
     paste0(colnames(Xflat_sel), "__t"),
     paste0(colnames(Xflat_sel), "__tminus1")
   )
-  
+
   y_logv_lag <- y_logv[-1]
   y_rv_lag   <- y_rv[-1]
-  
+
   logv_t     <- logv[t_end]
   logv_t_std <- standardize_by_idx(matrix(logv_t, ncol = 1), idx_fit = idx_dev)$Xs[, 1]
-  
+
   Xflat_X     <- cbind(logv_t = as.numeric(logv_t_std), Xflat_sel)
   Xflat_lag_X <- cbind(logv_t = as.numeric(logv_t_std[-1]), Xflat_lag)
-  
+
+  # ----- Minor-revision ML benchmark / ablation design ------------------------
+  # Raw lag-stack alternative: same retained predictor histories, no B-spline
+  # smoothing and no PLS compression. This addresses the reviewer request for a
+  # simple regularized machine-learning benchmark and a minimal ablation against
+  # the smoothed window-to-curve + PLS representation. Scaling is DEV-only.
+  Xraw_stack <- NULL
+  for(vv in sel_vars){
+    Mraw <- Xwin_aligned[[vv]]
+    colnames(Mraw) <- paste0(vv, "_rawlag", sprintf("%02d", seq_len(W_CURVE)))
+    Xraw_stack <- cbind(Xraw_stack, Mraw)
+  }
+  Xraw_stack_std <- standardize_by_idx(Xraw_stack, idx_fit = idx_dev)$Xs
+  Xenet_stack <- cbind(logv_t = as.numeric(logv_t_std), Xraw_stack_std)
+
   n_all_L     <- length(y_logv_lag)
   n_test_L    <- floor(TEST_RATIO * n_all_L)
   n_dev_L     <- n_all_L - n_test_L
@@ -1186,43 +1230,45 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
   train_end_L <- n_dev_L - n_val_L
   idx_val_L   <- (train_end_L + 1L):n_dev_L
   idx_test_L  <- (n_dev_L + 1L):n_all_L
-  
+
   # ----- HAR / HAR-X(logVIX) --------------------------------------------------
   Xhar <- har_design(logv, t_end_idx = t_end, Xextra = NULL)
-  
+
   x_vix <- NULL
   if("VIX" %in% colnames(close_panel)){
     x_vix <- log(pmax(as.numeric(close_panel[t_end, "VIX"]), 1e-12))
     x_vix <- standardize_by_idx(matrix(x_vix, ncol = 1), idx_fit = idx_dev)$Xs[, 1]
   }
-  
+
   XharX <- if(!is.null(x_vix)) {
     har_design(logv, t_end_idx = t_end, Xextra = cbind(logVIX = x_vix))
   } else {
     Xhar
   }
-  
+
   # ----- Validation forecasts -------------------------------------------------
   pred_ar1_val    <- oos_forecast_expanding(y_logv, NULL,            idx_val,   refit_every, fit_ar1, pred_ar1_1step)
   pred_har_val    <- oos_forecast_expanding(y_logv, Xhar,            idx_val,   refit_every, fit_lm,  pred_lm_1step)
   pred_harX_val   <- oos_forecast_expanding(y_logv, XharX,           idx_val,   refit_every, fit_lm,  pred_lm_1step)
-  
+  pred_enet_val   <- oos_forecast_expanding(y_logv, Xenet_stack,     idx_val,   refit_every, fit_enet_blocked, pred_enet_1step)
+
   pred_fvar_val   <- oos_forecast_expanding(y_logv, Xflat_sel,       idx_val,   refit_every, fit_pls, pred_pls_1step)
   pred_fvarX_val  <- oos_forecast_expanding(y_logv, Xflat_X,         idx_val,   refit_every, fit_pls, pred_pls_1step)
   pred_fvarL_val  <- oos_forecast_expanding(y_logv_lag, Xflat_lag,   idx_val_L, refit_every, fit_pls, pred_pls_1step)
   pred_fvarLX_val <- oos_forecast_expanding(y_logv_lag, Xflat_lag_X, idx_val_L, refit_every, fit_pls, pred_pls_1step)
-  
+
   vhat_ar1_val    <- exp(pred_ar1_val)
   vhat_har_val    <- exp(pred_har_val)
   vhat_harX_val   <- exp(pred_harX_val)
+  vhat_enet_val   <- exp(pred_enet_val)
   vhat_fvar_val   <- exp(pred_fvar_val)
   vhat_fvarX_val  <- exp(pred_fvarX_val)
   vhat_fvarL_val  <- exp(pred_fvarL_val)
   vhat_fvarLX_val <- exp(pred_fvarLX_val)
-  
+
   v_t           <- as.numeric(rv)[t_end]
   vhat_pers_val <- v_t[idx_val]
-  
+
   # ----- GARCH family ---------------------------------------------------------
   spec_sgarch <- rugarch::ugarchspec(
     variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
@@ -1239,42 +1285,44 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     mean.model     = list(armaOrder = c(0, 0), include.mean = FALSE),
     distribution.model = "norm"
   )
-  
+
   vhat_garch_val  <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_val, refit_every, spec_sgarch)
   vhat_egarch_val <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_val, refit_every, spec_egarch)
   vhat_gjr_val    <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_val, refit_every, spec_gjr)
-  
+
   # ----- Test forecasts -------------------------------------------------------
   pred_ar1_test    <- oos_forecast_expanding(y_logv, NULL,            idx_test,   refit_every, fit_ar1, pred_ar1_1step)
   pred_har_test    <- oos_forecast_expanding(y_logv, Xhar,            idx_test,   refit_every, fit_lm,  pred_lm_1step)
   pred_harX_test   <- oos_forecast_expanding(y_logv, XharX,           idx_test,   refit_every, fit_lm,  pred_lm_1step)
-  
+  pred_enet_test   <- oos_forecast_expanding(y_logv, Xenet_stack,     idx_test,   refit_every, fit_enet_blocked, pred_enet_1step)
+
   pred_fvar_test   <- oos_forecast_expanding(y_logv, Xflat_sel,       idx_test,   refit_every, fit_pls, pred_pls_1step)
   pred_fvarX_test  <- oos_forecast_expanding(y_logv, Xflat_X,         idx_test,   refit_every, fit_pls, pred_pls_1step)
   pred_fvarL_test  <- oos_forecast_expanding(y_logv_lag, Xflat_lag,   idx_test_L, refit_every, fit_pls, pred_pls_1step)
   pred_fvarLX_test <- oos_forecast_expanding(y_logv_lag, Xflat_lag_X, idx_test_L, refit_every, fit_pls, pred_pls_1step)
-  
+
   vhat_ar1_test    <- exp(pred_ar1_test)
   vhat_har_test    <- exp(pred_har_test)
   vhat_harX_test   <- exp(pred_harX_test)
+  vhat_enet_test   <- exp(pred_enet_test)
   vhat_fvar_test   <- exp(pred_fvar_test)
   vhat_fvarX_test  <- exp(pred_fvarX_test)
   vhat_fvarL_test  <- exp(pred_fvarL_test)
   vhat_fvarLX_test <- exp(pred_fvarLX_test)
-  
+
   vhat_pers_test   <- v_t[idx_test]
-  
+
   vhat_garch_test  <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_test, refit_every, spec_sgarch)
   vhat_egarch_test <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_test, refit_every, spec_egarch)
   vhat_gjr_test    <- garch_forecast_oos_map(retX[, target_nm], t_end, idx_test, refit_every, spec_gjr)
-  
+
   # ----- COMMON-aligned evaluation -------------------------------------------
   dates_oos     <- index(rv)[t_end + 1L]
   dates_oos_lag <- dates_oos[-1]
-  
+
   V_val  <- xts(y_rv[idx_val],  order.by = dates_oos[idx_val])
   V_test <- xts(y_rv[idx_test], order.by = dates_oos[idx_test])
-  
+
   S_val <- list(
     Persistence = xts(vhat_pers_val,   order.by = dates_oos[idx_val]),
     AR1_logv    = xts(vhat_ar1_val,    order.by = dates_oos[idx_val]),
@@ -1283,12 +1331,13 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     GARCH11     = xts(vhat_garch_val,  order.by = dates_oos[idx_val]),
     EGARCH11    = xts(vhat_egarch_val, order.by = dates_oos[idx_val]),
     GJR11       = xts(vhat_gjr_val,    order.by = dates_oos[idx_val]),
+    EN_LagStack = xts(vhat_enet_val,   order.by = dates_oos[idx_val]),
     fVAR        = xts(vhat_fvar_val,   order.by = dates_oos[idx_val]),
     fVAR_X      = xts(vhat_fvarX_val,  order.by = dates_oos[idx_val]),
     fVAR_L      = xts(vhat_fvarL_val,  order.by = dates_oos_lag[idx_val_L]),
     fVAR_LX     = xts(vhat_fvarLX_val, order.by = dates_oos_lag[idx_val_L])
   )
-  
+
   S_test <- list(
     Persistence = xts(vhat_pers_test,   order.by = dates_oos[idx_test]),
     AR1_logv    = xts(vhat_ar1_test,    order.by = dates_oos[idx_test]),
@@ -1297,51 +1346,53 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     GARCH11     = xts(vhat_garch_test,  order.by = dates_oos[idx_test]),
     EGARCH11    = xts(vhat_egarch_test, order.by = dates_oos[idx_test]),
     GJR11       = xts(vhat_gjr_test,    order.by = dates_oos[idx_test]),
+    EN_LagStack = xts(vhat_enet_test,   order.by = dates_oos[idx_test]),
     fVAR        = xts(vhat_fvar_test,   order.by = dates_oos[idx_test]),
     fVAR_X      = xts(vhat_fvarX_test,  order.by = dates_oos[idx_test]),
     fVAR_L      = xts(vhat_fvarL_test,  order.by = dates_oos_lag[idx_test_L]),
     fVAR_LX     = xts(vhat_fvarLX_test, order.by = dates_oos_lag[idx_test_L])
   )
-  
+
   M_val  <- na.omit(do.call(merge, c(list(Actual = V_val),  S_val,  all = FALSE)))
   M_test <- na.omit(do.call(merge, c(list(Actual = V_test), S_test, all = FALSE)))
-  
+
   write.csv(data.frame(Date = index(M_test), coredata(M_test)),
             file.path(OUT, "data", "paths_TEST_common_aligned.csv"),
             row.names = FALSE)
-  
+
   # ----- Metrics --------------------------------------------------------------
   tab_val  <- collect_metric_table_from_M(M_val)
   tab_test <- collect_metric_table_from_M(M_test)
-  
+
   best_fun_val  <- choose_best_functional(tab_val)
   best_fun_test <- choose_best_functional(tab_test)
-  
+
   best_fun_val_label  <- best_fun_val$Model[1]
   best_fun_val_col    <- MODEL_MAP[[best_fun_val_label]]
   best_fun_test_label <- best_fun_test$Model[1]
   best_fun_test_col   <- MODEL_MAP[[best_fun_test_label]]
-  
+
   write_csv(tab_test, OUT, "T2_var_oos_metrics_TEST_raw")
-  
+
   # manuscript-ready QLIKE table
   tab_qlike_tex <- copy(tab_test[, .(Model, QLIKE, Delta_QLIKE_vs_GARCH)])
   setorder(tab_qlike_tex, QLIKE)
   tab_qlike_tex[, Model := display_model(Model)]
   tab_qlike_tex[, QLIKE := fmt4(QLIKE)]
-  tab_qlike_tex[, `\\Delta QLIKE vs GARCH` := fmt4(Delta_QLIKE_vs_GARCH)]
-  tab_qlike_tex <- tab_qlike_tex[, .(Model, QLIKE, `\\Delta QLIKE vs GARCH`)]
+  tab_qlike_tex[, DeltaQLIKE := fmt4(Delta_QLIKE_vs_GARCH)]
+  tab_qlike_tex <- tab_qlike_tex[, .(Model, QLIKE, DeltaQLIKE)]
+  setnames(tab_qlike_tex, "DeltaQLIKE", "$\\Delta$ QLIKE vs GARCH")
   tab_qlike_tex <- pad_even_dt(tab_qlike_tex)
-  
+
   write_longtable_2block(
     tab_qlike_tex,
     OUT, "T1_var_oos_qlike",
-    caption = "Out-of-sample variance forecasting performance under QLIKE (lower is better) on the \\texttt{COMMON-aligned TEST} set. Results are reported under the baseline \\DAXCLOSE\\ information-availability convention. The final column reports differences relative to GARCH(1,1), computed as model QLIKE minus GARCH QLIKE.",
+    caption = sprintf("Out-of-sample variance forecasting performance under QLIKE (lower is better) on the \\texttt{COMMON-aligned TEST} set. Results are reported under the %s information-availability convention. The final column reports differences relative to GARCH(1,1), computed as model QLIKE minus GARCH QLIKE.", avail_tex),
     label = sprintf("tab:var_oos_qlike_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
-    left_cols  = c("Model","QLIKE","\\Delta QLIKE vs GARCH"),
-    right_cols = c("Model","QLIKE","\\Delta QLIKE vs GARCH")
+    left_cols  = c("Model","QLIKE","$\\Delta$ QLIKE vs GARCH"),
+    right_cols = c("Model","QLIKE","$\\Delta$ QLIKE vs GARCH")
   )
-  
+
   # manuscript-ready MAE/RMSE
   tab_mrmse_tex <- copy(tab_test[, .(Model, MAE_var, RMSE_var)])
   tab_mrmse_tex[, Model := display_model(Model)]
@@ -1349,20 +1400,50 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
   tab_mrmse_tex[, RMSE := sprintf("%.7f", RMSE_var)]
   tab_mrmse_tex <- tab_mrmse_tex[, .(Model, MAE, RMSE)]
   tab_mrmse_tex <- pad_even_dt(tab_mrmse_tex)
-  
+
   write_longtable_2block(
     tab_mrmse_tex,
     OUT, "T2_var_oos_mae_rmse",
-    caption = "Out-of-sample variance forecasting performance under MAE and RMSE on the variance scale, evaluated on the \\texttt{COMMON-aligned TEST} set. Results are reported under the baseline \\DAXCLOSE\\ information-availability convention.",
+    caption = sprintf("Out-of-sample variance forecasting performance under MAE and RMSE on the variance scale, evaluated on the \\texttt{COMMON-aligned TEST} set. Results are reported under the %s information-availability convention.", avail_tex),
     label = sprintf("tab:var_oos_mae_rmse_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
     left_cols  = c("Model","MAE","RMSE"),
     right_cols = c("Model","MAE","RMSE")
   )
-  
+
+  # ----- Minimal ablation table: smoothed fVAR-X/PLS vs raw lag-stack EN -------
+  ablation_models <- c("HAR-X(logVIX)", "Elastic Net lag stack", "fVAR-X(+logv_t)")
+  ablation_tab <- copy(tab_test[Model %in% ablation_models,
+                                .(Model, QLIKE, MAE_var, RMSE_var)])
+  base_q <- ablation_tab[Model == "fVAR-X(+logv_t)", QLIKE]
+  if(length(base_q) == 1L && is.finite(base_q)){
+    ablation_tab[, Delta_QLIKE_vs_fVARX := QLIKE - base_q]
+  } else {
+    ablation_tab[, Delta_QLIKE_vs_fVARX := NA_real_]
+  }
+  setorder(ablation_tab, QLIKE)
+  write_csv(ablation_tab, OUT, "A6_minimal_ablation_raw_lagstack_raw")
+
+  ablation_tex <- copy(ablation_tab)
+  ablation_tex[, Model := display_model(Model)]
+  ablation_tex[, QLIKE := fmt4(QLIKE)]
+  ablation_tex[, DeltaQLIKE_fVARX := fmt4(Delta_QLIKE_vs_fVARX)]
+  ablation_tex[, MAE := sprintf("%.7f", MAE_var)]
+  ablation_tex[, RMSE := sprintf("%.7f", RMSE_var)]
+  ablation_tex <- ablation_tex[, .(Model, QLIKE, DeltaQLIKE_fVARX, MAE, RMSE)]
+  setnames(ablation_tex, "DeltaQLIKE_fVARX", "$\\Delta$ QLIKE vs fVAR-X")
+
+  write_longtable_simple(
+    ablation_tex,
+    OUT, "A6_minimal_ablation_raw_lagstack",
+    caption = "Minimal ablation comparing the smoothed window-to-curve plus PLS functional representative with a raw Elastic Net lag-stack benchmark. The raw lag-stack uses the same retained predictor histories and lagged log-variance but omits B-spline smoothing and PLS compression. Results are evaluated on the same \\texttt{COMMON-aligned TEST} set.",
+    label = sprintf("tab:ablation_raw_lagstack_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
+    align = "lcccc"
+  )
+
   # ----- DM tests vs GARCH ----------------------------------------------------
   V_true <- as.numeric(M_test[, "Actual"])
   loss_g <- qlike_vec(V_true, as.numeric(M_test[, "GARCH11"]))
-  
+
   dm_one <- function(model_col, model_name){
     loss_m <- qlike_vec(V_true, as.numeric(M_test[, model_col]))
     dmL <- dm_loss(loss_m, loss_g, alternative = "less",      L = DM_NW_LAG)
@@ -1375,24 +1456,25 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
       N          = dmL$n
     )
   }
-  
+
   dm_tab <- rbindlist(list(
     dm_one("AR1_logv", "AR(1)-logv"),
     dm_one("HAR",      "HAR"),
     dm_one("HAR_X",    "HAR-X(logVIX)"),
     dm_one("EGARCH11", "EGARCH(1,1)"),
-    dm_one("GJR11",    "GJR-GARCH(1,1)"),
-    dm_one("fVAR",     "fVAR"),
+    dm_one("GJR11",       "GJR-GARCH(1,1)"),
+    dm_one("EN_LagStack", "Elastic Net lag stack"),
+    dm_one("fVAR",        "fVAR"),
     dm_one("fVAR_X",   "fVAR-X(+logv_t)"),
     dm_one("fVAR_L",   "fVAR-Lagged"),
     dm_one("fVAR_LX",  "fVAR-Lagged-X")
   ), fill = TRUE)
-  
+
   dm_tab[, Holm := p.adjust(P_one, method = "holm")]
   dm_tab[, BH   := p.adjust(P_one, method = "BH")]
-  
+
   write_csv(dm_tab, OUT, "T3_dm_qlike_TEST_raw")
-  
+
   dm_tab_tex <- copy(dm_tab)
   dm_tab_tex[, Comparison := gsub("fVAR-X\\(\\+logv_t\\)", "fVAR-X(+logv$_t$)", Comparison)]
   dm_tab_tex[, DM := fmt4(DM)]
@@ -1401,19 +1483,19 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
   dm_tab_tex[, Holm := fmt4(Holm)]
   dm_tab_tex[, BH := fmt4(BH)]
   dm_tab_tex <- dm_tab_tex[, .(Comparison, DM, `$p_{\\text{one}}$`, `$p_{\\text{two}}$`, Holm, BH, N)]
-  
+
   write_longtable_simple(
     dm_tab_tex,
     OUT, "T3_dm_qlike",
-    caption = "Diebold--Mariano tests on QLIKE loss differentials relative to GARCH(1,1), evaluated on the \\texttt{COMMON-aligned TEST} set under the baseline \\DAXCLOSE\\ convention. One-sided and two-sided $p$-values are reported together with Holm- and Benjamini--Hochberg-adjusted one-sided values.",
+    caption = sprintf("Diebold--Mariano tests on QLIKE loss differentials relative to GARCH(1,1), evaluated on the \\texttt{COMMON-aligned TEST} set under the %s convention. One-sided and two-sided $p$-values are reported together with Holm- and Benjamini--Hochberg-adjusted one-sided values.", avail_tex),
     label = sprintf("tab:dm_qlike_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
     align = "lcccccc"
   )
-  
+
   # ----- Bootstrap CI + sensitivity (computed once, reused everywhere) -------
   loss_bestf <- qlike_vec(V_true, as.numeric(M_test[, best_fun_val_col]))
   diff_bestf <- loss_bestf - loss_g
-  
+
   boot_sens_raw <- rbindlist(lapply(BOOT_B_GRID, function(BB){
     bt <- mbb_mean_diff(diff_bestf, B = BB, R = 2000L)
     data.table(
@@ -1423,7 +1505,7 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
       CI_U     = bt$ci[2]
     )
   }), fill = TRUE)
-  
+
   boot10_row <- boot_sens_raw[B == 10L]
   boot_tab_ci <- data.table(
     Comparison = paste(best_fun_val_label, "minus GARCH(1,1)"),
@@ -1432,45 +1514,46 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     CI_U       = boot10_row$CI_U
   )
   write_csv(boot_tab_ci, OUT, "T4_boot_ci_B10_raw")
-  
+
   boot_tab_ci_tex <- copy(boot_tab_ci)
   boot_tab_ci_tex[, Comparison := gsub("fVAR-X\\(\\+logv_t\\)", "fVAR-X(+logv$_t$)", Comparison)]
   boot_tab_ci_tex[, `Mean diff.` := fmt4(MeanDiff)]
   boot_tab_ci_tex[, `CI lower` := fmt4(CI_L)]
   boot_tab_ci_tex[, `CI upper` := fmt4(CI_U)]
   boot_tab_ci_tex <- boot_tab_ci_tex[, .(Comparison, `Mean diff.`, `CI lower`, `CI upper`)]
-  
+
   write_longtable_simple(
     boot_tab_ci_tex,
     OUT, "T4_boot_ci",
-    caption = "Moving-block bootstrap 95\\% confidence interval for the mean QLIKE difference on the \\texttt{COMMON-aligned TEST} set (validation-selected functional representative minus GARCH). Results are reported under the baseline \\DAXCLOSE\\ convention with block length $B=10$.",
+    caption = sprintf("Moving-block bootstrap 95\\%% confidence interval for the mean QLIKE difference on the \\texttt{COMMON-aligned TEST} set (validation-selected functional representative minus GARCH). Results are reported under the %s convention with block length $B=10$.", avail_tex),
     label = sprintf("tab:boot_ci_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
     align = "lccc"
   )
-  
+
   # ----- Diagnostics ----------------------------------------------------------
   r_next        <- as.numeric(retX[, target_nm])[t_end + 1L]
   r_test_xts    <- xts(r_next, order.by = dates_oos)
   r_test_common <- r_test_xts[index(M_test)]
-  
+
   diag_models <- list(
     "GARCH(1,1)"      = "GARCH11",
     "EGARCH(1,1)"     = "EGARCH11",
     "HAR"             = "HAR",
     "HAR-X(logVIX)"   = "HAR_X",
+    "Elastic Net lag stack" = "EN_LagStack",
     "fVAR-X(+logv_t)" = "fVAR_X",
     "fVAR-Lagged-X"   = "fVAR_LX"
   )
-  
+
   diag_rows <- lapply(names(diag_models), function(lbl){
     col_nm <- diag_models[[lbl]]
     vhat_i <- as.numeric(M_test[, col_nm])
     z_i    <- z_from_vhat(as.numeric(r_test_common), vhat_i)
-    
+
     a10 <- arch_lm(z_i, m = 10L)
     lb  <- try(Box.test(as.numeric(z_i)^2, lag = 10L, type = "Ljung-Box"), silent = TRUE)
     lbp <- if(inherits(lb, "try-error")) NA_real_ else as.numeric(lb$p.value)
-    
+
     data.table(
       Model      = lbl,
       ARCH_LM_10 = a10$stat,
@@ -1479,17 +1562,17 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
       N          = a10$n
     )
   })
-  
+
   diag_tab <- rbindlist(diag_rows, fill = TRUE)
   write_csv(diag_tab, OUT, "A4_diag_TEST_raw")
-  
+
   diag_tab_tex <- copy(diag_tab)
   diag_tab_tex[, Model := display_model(Model)]
   diag_tab_tex[, `ARCH--LM(10)` := fmt4(ARCH_LM_10)]
   diag_tab_tex[, `$p$-value` := fmt_p_diag(P_10)]
   diag_tab_tex[, `LB $p$-value` := fmt_p_diag(LB_p_10)]
   diag_tab_tex <- diag_tab_tex[, .(Model, `ARCH--LM(10)`, `$p$-value`, `LB $p$-value`, N)]
-  
+
   write_longtable_simple(
     diag_tab_tex,
     OUT, "A4_diag_TEST",
@@ -1497,69 +1580,135 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     label = sprintf("tab:diag_%s_%s_ref%d_%s", TARGET_NAME, cfg_name, refit_every, avail_mode),
     align = "lcccc"
   )
-  
+
   # ----- Figures --------------------------------------------------------------
-  df_path <- data.frame(
-    Date         = index(M_test),
-    Actual       = as.numeric(M_test[, "Actual"]),
-    GARCH        = as.numeric(M_test[, "GARCH11"]),
-    HAR          = as.numeric(M_test[, "HAR"]),
-    EGARCH       = as.numeric(M_test[, "EGARCH11"]),
-    BestFunction = as.numeric(M_test[, best_fun_val_col])
+  # The figures use manuscript-friendly labels without underscores so that the
+  # repository output can be inserted directly in the paper or appendix.
+
+  df_path <- data.table(
+    Date = index(M_test),
+    Actual = as.numeric(M_test[, "Actual"]),
+    `HAR-X(logVIX)` = as.numeric(M_test[, "HAR_X"]),
+    HAR = as.numeric(M_test[, "HAR"]),
+    `Elastic Net lag stack` = as.numeric(M_test[, "EN_LagStack"]),
+    `fVAR-X(+logv_t)` = as.numeric(M_test[, "fVAR_X"])
   )
-  
-  p1 <- ggplot(df_path, aes(x = Date)) +
-    geom_line(aes(y = Actual, color = "Actual"), linewidth = 1.2) +
-    geom_line(aes(y = GARCH, color = "GARCH(1,1)"), linewidth = 1.0, linetype = "dashed") +
-    geom_line(aes(y = EGARCH, color = "EGARCH(1,1)"), linewidth = 0.9, linetype = "dotdash") +
-    geom_line(aes(y = HAR, color = "HAR"), linewidth = 0.9, linetype = "dotted") +
-    geom_line(aes(y = BestFunction, color = display_model(best_fun_val_label)), linewidth = 1.0) +
+
+  path_long <- melt(
+    df_path,
+    id.vars = "Date",
+    variable.name = "Model",
+    value.name = "Variance"
+  )
+  path_long[, ModelPlot := plot_model_label(Model)]
+
+  path_levels <- plot_model_label(c(
+    "Actual", "HAR-X(logVIX)", "HAR", "Elastic Net lag stack", "fVAR-X(+logv_t)"
+  ))
+  path_long[, ModelPlot := factor(ModelPlot, levels = path_levels)]
+
+  zoom_cut <- as.numeric(quantile(df_path$Actual, probs = 0.99, na.rm = TRUE))
+  zoom_label <- "Zoomed view"
+  max_date <- as.Date(df_path$Date[which.max(df_path$Actual)])
+
+  path_full <- copy(path_long)
+  path_full[, Panel := "Full scale"]
+
+  path_zoom <- copy(path_long)
+  path_zoom[Variance > zoom_cut, Variance := NA_real_]
+  path_zoom[, Panel := zoom_label]
+
+  path_plot <- rbindlist(list(path_full, path_zoom), use.names = TRUE)
+  path_plot[, Panel := factor(Panel, levels = c("Full scale", zoom_label))]
+
+  p1 <- ggplot(path_plot, aes(x = Date, y = Variance,
+                              color = ModelPlot, linetype = ModelPlot)) +
+    geom_line(linewidth = 0.65, na.rm = TRUE) +
+    geom_vline(xintercept = max_date,
+               linetype = "dashed", linewidth = 0.35, alpha = 0.70) +
+    facet_grid(Panel ~ ., scales = "free_y") +
     labs(
-      y = "RS variance", color = NULL,
-      title = sprintf("Variance paths (TEST, common aligned) ??? Target=%s | cfg=%s | refit=%d | avail=%s",
-                      TARGET_NAME, cfg_name, refit_every, avail_mode)
+      x = "Date",
+      y = "RS variance",
+      color = NULL,
+      linetype = NULL,
+      title = "Forecast paths on the COMMON-aligned TEST set",
+      subtitle = sprintf("Target = %s | configuration = %s | refit = %d | availability = %s",
+                         TARGET_NAME, cfg_name, refit_every, avail_plot)
     ) +
     theme_minimal(base_size = 14) +
-    theme(legend.position = "top")
-  
+    theme(
+      legend.position = "top",
+      legend.box = "horizontal",
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold"),
+      panel.spacing.y = unit(0.8, "lines")
+    )
+
   ggsave(file.path(OUT, "plots", "F1_paths_TEST.png"),
-         p1, width = 11, height = 5.5, dpi = PLOT_DPI)
-  
-  loss_dt <- data.table(
-    Date           = index(M_test),
-    GARCH          = loss_g,
-    HAR            = qlike_vec(V_true, as.numeric(M_test[, "HAR"])),
-    EGARCH         = qlike_vec(V_true, as.numeric(M_test[, "EGARCH11"])),
-    BestFunctional = qlike_vec(V_true, as.numeric(M_test[, best_fun_val_col]))
-  )
-  
-  setnames(loss_dt, "BestFunctional", display_model(best_fun_val_label))
-  
-  loss_long <- melt(loss_dt, id.vars = "Date", variable.name = "Model", value.name = "QLIKE")
+         p1, width = 12, height = 6.8, dpi = PLOT_DPI)
+
+  loss_long <- rbindlist(lapply(names(MODEL_MAP), function(lbl){
+    col_nm <- MODEL_MAP[[lbl]]
+    data.table(
+      Date = index(M_test),
+      Model = lbl,
+      QLIKE = qlike_vec(V_true, as.numeric(M_test[, col_nm]))
+    )
+  }), use.names = TRUE, fill = TRUE)
+
+  loss_summary <- loss_long[
+    is.finite(QLIKE),
+    .(MeanQLIKE = mean(QLIKE, na.rm = TRUE)),
+    by = Model
+  ]
+  setorder(loss_summary, MeanQLIKE)
+  loss_summary[, Rank := seq_len(.N)]
+  loss_summary[, FacetID := sprintf("%02d", Rank)]
+  loss_summary[, FacetLabel := sprintf("%d. %s", Rank, plot_model_label(Model))]
+
+  facet_labels <- setNames(loss_summary$FacetLabel, loss_summary$FacetID)
+  loss_long <- merge(loss_long, loss_summary[, .(Model, MeanQLIKE, Rank, FacetID, FacetLabel)],
+                     by = "Model", all.x = TRUE)
+  loss_long[, FacetID := factor(FacetID, levels = loss_summary$FacetID)]
+
   x_lo <- as.numeric(quantile(loss_long$QLIKE, 0.005, na.rm = TRUE))
   x_hi <- as.numeric(quantile(loss_long$QLIKE, 0.995, na.rm = TRUE))
-  
-  p2 <- ggplot(loss_long, aes(x = QLIKE, fill = Model)) +
-    geom_density(alpha = 0.30) +
+
+  p2 <- ggplot(loss_long[is.finite(QLIKE)], aes(x = QLIKE)) +
+    geom_density(fill = "grey70", color = "grey25", alpha = 0.35, linewidth = 0.50) +
+    geom_vline(data = loss_summary,
+               aes(xintercept = MeanQLIKE),
+               linetype = "dashed", linewidth = 0.35, color = "grey20") +
     coord_cartesian(xlim = c(x_lo, x_hi)) +
-    labs(x = "QLIKE (lower is better)", y = "Density",
-         title = "QLIKE distribution (TEST, common aligned; central 99%)") +
-    theme_minimal(base_size = 14) +
-    theme(legend.position = "top")
-  
+    facet_wrap(~ FacetID, ncol = 3, scales = "free_y",
+               labeller = labeller(FacetID = facet_labels)) +
+    labs(
+      x = "QLIKE (lower is better)",
+      y = "Density",
+      title = "QLIKE distributions on the COMMON-aligned TEST set",
+      subtitle = "Models are ordered by mean QLIKE; dashed line = model-specific mean"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold"),
+      panel.spacing = unit(0.8, "lines")
+    )
+
   ggsave(file.path(OUT, "plots", "F2_qlike_density_TEST.png"),
-         p2, width = 11, height = 5.0, dpi = PLOT_DPI)
-  
+         p2, width = 12.5, height = 9.0, dpi = PLOT_DPI)
+
   # ----- Validation summary ---------------------------------------------------
   qlike_garch_val <- tab_val[Model == "GARCH(1,1)", QLIKE]
   qlike_bestf_val <- best_fun_val$QLIKE[1]
-  
+
   loss_g_val     <- qlike_vec(as.numeric(M_val[, "Actual"]), as.numeric(M_val[, "GARCH11"]))
   loss_bestf_val <- qlike_vec(as.numeric(M_val[, "Actual"]), as.numeric(M_val[, best_fun_val_col]))
-  
+
   dm_val_less <- dm_loss(loss_bestf_val, loss_g_val, alternative = "less",      L = DM_NW_LAG)
   dm_val_two  <- dm_loss(loss_bestf_val, loss_g_val, alternative = "two.sided", L = DM_NW_LAG)
-  
+
   run_sum <- data.table(
     Target                   = TARGET_NAME,
     Cfg                      = cfg_name,
@@ -1584,13 +1733,13 @@ run_one <- function(cfg_name, refit_every, avail_mode = c("GLOBAL_CLOSE","DAX_CL
     N_val_common             = NROW(M_val),
     N_test_common            = NROW(M_test)
   )
-  
+
   write_csv(run_sum, OUT, "run_summary")
-  
+
   sink(file.path(OUT, "debug", "sessionInfo.txt"))
   print(sessionInfo())
   sink()
-  
+
   list(
     OUT                = OUT,
     summary            = run_sum,
@@ -1668,7 +1817,7 @@ q_rob_bf  <- tab_rob[Model == ROB_RUN$best_fun_val_label, QLIKE]
 AVTAB_BF <- data.table(
   Protocol                    = c("\\DAXCLOSE", "\\GLOBALCLOSE"),
   `Selected functional model` = c(display_model(MAIN_RUN$best_fun_val_label),
-                                  display_model(ROB_RUN$best_fun_val_label)),
+                                   display_model(ROB_RUN$best_fun_val_label)),
   `QLIKE (GARCH)`             = c(fmt4(q_main_g), fmt4(q_rob_g)),
   `QLIKE (selected)`          = c(fmt4(q_main_bf), fmt4(q_rob_bf)),
   `Mean diff.`                = c(fmt4(q_main_bf - q_main_g), fmt4(q_rob_bf - q_rob_g)),
@@ -1697,9 +1846,10 @@ PROT_FULL_TEX[, `QLIKE (\\DAXCLOSE)` := fmt4(get("QLIKE_DAX_CLOSE"))]
 PROT_FULL_TEX[, `Rank (\\DAXCLOSE)`  := get("Rank_DAX_CLOSE")]
 PROT_FULL_TEX[, `QLIKE (\\GLOBALCLOSE)` := fmt4(get("QLIKE_GLOBAL_CLOSE"))]
 PROT_FULL_TEX[, `Rank (\\GLOBALCLOSE)`  := get("Rank_GLOBAL_CLOSE")]
-PROT_FULL_TEX[, `\\Delta QLIKE` := fmt4(Delta_MAIN_minus_ROB)]
+PROT_FULL_TEX[, DeltaQLIKE := fmt4(Delta_MAIN_minus_ROB)]
 PROT_FULL_TEX <- PROT_FULL_TEX[, .(Model, `QLIKE (\\DAXCLOSE)`, `Rank (\\DAXCLOSE)`,
-                                   `QLIKE (\\GLOBALCLOSE)`, `Rank (\\GLOBALCLOSE)`, `\\Delta QLIKE`)]
+                                   `QLIKE (\\GLOBALCLOSE)`, `Rank (\\GLOBALCLOSE)`, DeltaQLIKE)]
+setnames(PROT_FULL_TEX, "DeltaQLIKE", "$\\Delta$ QLIKE")
 write_csv(PROT_FULL_TEX, OUT_BASE, "A4b_protocol_modelset_owncommon")
 write_longtable_simple(
   PROT_FULL_TEX,
@@ -1718,11 +1868,13 @@ PROT_REL <- make_protocol_vs_garch_compare(
 
 PROT_REL_TEX <- copy(PROT_REL)
 PROT_REL_TEX[, Model := display_model(Model)]
-PROT_REL_TEX[, `$\\Delta$QLIKE vs GARCH (\\DAXCLOSE)` := fmt4(get("Delta_vs_GARCH_DAX_CLOSE"))]
-PROT_REL_TEX[, `$\\Delta$QLIKE vs GARCH (\\GLOBALCLOSE)` := fmt4(get("Delta_vs_GARCH_GLOBAL_CLOSE"))]
+PROT_REL_TEX[, DeltaGARCH_DAXCLOSE := fmt4(get("Delta_vs_GARCH_DAX_CLOSE"))]
+PROT_REL_TEX[, DeltaGARCH_GLOBALCLOSE := fmt4(get("Delta_vs_GARCH_GLOBAL_CLOSE"))]
 PROT_REL_TEX[, Gap := fmt4(DeltaGap_MAIN_minus_ROB)]
-PROT_REL_TEX <- PROT_REL_TEX[, .(Model, `$\\Delta$QLIKE vs GARCH (\\DAXCLOSE)`,
-                                 `$\\Delta$QLIKE vs GARCH (\\GLOBALCLOSE)`, Gap)]
+PROT_REL_TEX <- PROT_REL_TEX[, .(Model, DeltaGARCH_DAXCLOSE, DeltaGARCH_GLOBALCLOSE, Gap)]
+setnames(PROT_REL_TEX,
+         c("DeltaGARCH_DAXCLOSE", "DeltaGARCH_GLOBALCLOSE"),
+         c("$\\Delta$QLIKE vs GARCH (\\DAXCLOSE)", "$\\Delta$QLIKE vs GARCH (\\GLOBALCLOSE)"))
 write_csv(PROT_REL_TEX, OUT_BASE, "A4c_protocol_vs_garch_owncommon")
 write_longtable_simple(
   PROT_REL_TEX,
@@ -1808,6 +1960,7 @@ write_manifest_locked <- function(main_out, out_base){
     sprintf("\\input{%s}", to_tex_path(file.path(main_out, "tex", "A2_gcv_grid.tex"))),
     sprintf("\\input{%s}", to_tex_path(file.path(main_out, "tex", "A3_selected_vars.tex"))),
     sprintf("\\input{%s}", to_tex_path(file.path(main_out, "tex", "A4_diag_TEST.tex"))),
+    sprintf("\\input{%s}", to_tex_path(file.path(main_out, "tex", "A6_minimal_ablation_raw_lagstack.tex"))),
     sprintf("\\input{%s}", to_tex_path(file.path(out_base, "tex", "A1_sweep_summary_VAL_locked.tex"))),
     sprintf("\\input{%s}", to_tex_path(file.path(out_base, "tex", "A2_bootB_sensitivity.tex"))),
     sprintf("\\input{%s}", to_tex_path(file.path(out_base, "tex", "A4a_bestfunctional_protocol_compare.tex"))),
@@ -1824,7 +1977,7 @@ write_manifest_locked <- function(main_out, out_base){
     sprintf("%% F4: %s", to_tex_path(file.path(main_out, "plots", "F4_gcv_heatmap.png"))),
     "% =================================================================="
   )
-  
+
   fn <- file.path(out_base, "tex", "manifest_locked_prune095.tex")
   dir.create(dirname(fn), showWarnings = FALSE, recursive = TRUE)
   writeLines(tex_main, fn)
@@ -1834,4 +1987,5 @@ write_manifest_locked <- function(main_out, out_base){
 manifest_fn <- write_manifest_locked(MAIN_OUT, OUT_BASE)
 
 message("\nLocked manifest written: ", normalizePath(manifest_fn))
-message("\nDONE ??? Locked outputs under: ", normalizePath(OUT_BASE))
+message("\nDONE  Locked outputs under: ", normalizePath(OUT_BASE))
+
